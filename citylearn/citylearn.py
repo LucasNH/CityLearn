@@ -268,7 +268,7 @@ class CityLearnEnv(Environment, Env):
         self._render_start_datetime = None
 
         if self.render_enabled:
-            self._ensure_render_output_dir()
+            self._ensure_render_output_dir(ensure_exists=False)
 
     @property
     def render_start_date(self) -> datetime.date:
@@ -1029,8 +1029,8 @@ class CityLearnEnv(Environment, Env):
         # store episode reward summary at the end of episode (upon reaching final timestep)
         if self.terminated:
             if self.render_mode == 'during' and self.render_enabled:
-                # Capture the terminal timestep snapshot that occurs after the final transition.
-                self.render()
+                # Final step was already streamed during the most recent `next_time_step` call.
+                pass
             rewards = np.array(self.__rewards[1:], dtype='float32')
             self.__episode_rewards.append({
                 'min': rewards.min(axis=0).tolist(),
@@ -1039,14 +1039,21 @@ class CityLearnEnv(Environment, Env):
                 'mean': rewards.mean(axis=0).tolist()
             })
             if self.render_mode == 'end' and self.render_enabled:
-                final_index = max(min(self.time_steps - 1, self.time_step), 0)
-                state_snapshot = self._override_render_time_step(final_index)
-                self._defer_render_flush = True
-                try:
-                    self.render()
-                finally:
-                    self._restore_render_time_step(state_snapshot)
-                    self._defer_render_flush = False
+                if self.time_step > 0:
+                    final_index = min(self.time_steps - 1, self.time_step - 1)
+                else:
+                    final_index = 0
+
+                has_buffered_rows = any(self._render_buffer.values())
+
+                if not has_buffered_rows:
+                    state_snapshot = self._override_render_time_step(final_index)
+                    self._defer_render_flush = True
+                    try:
+                        self.render()
+                    finally:
+                        self._restore_render_time_step(state_snapshot)
+                        self._defer_render_flush = False
 
                 self._flush_render_buffer()
 
@@ -1682,41 +1689,61 @@ class CityLearnEnv(Environment, Env):
             "CityLearnEnv start_date must be a date, datetime, or ISO format string."
         )
 
-    def _ensure_render_output_dir(self):
-        """Ensure `new_folder_path` exists and dataset is copied once for logging/export.
+    def _ensure_render_output_dir(self, *, ensure_exists: bool = True):
+        """Prepare the render output directory and optionally create it on disk.
 
-        Safe to call multiple times; creates path lazily if missing.
+        Parameters
+        ----------
+        ensure_exists: bool, default: True
+            When ``True`` the directory tree is created (and legacy exports removed when
+            reusing :pyattr:`render_session_name`). When ``False`` only internal state is
+            updated so that paths can be materialized later on demand.
         """
         base_render_path = Path(getattr(self, 'render_output_root', Path(__file__).resolve().parents[1] / 'render_logs')).expanduser()
-        try:
-            base_render_path.mkdir(parents=True, exist_ok=True)
-        except PermissionError:
-            fallback = (Path.cwd() / 'render_logs').resolve()
-            fallback.mkdir(parents=True, exist_ok=True)
-            self.render_output_root = fallback
-            base_render_path = fallback
 
-        if getattr(self, '_render_directory_path', None) is None:
+        if ensure_exists:
+            try:
+                base_render_path.mkdir(parents=True, exist_ok=True)
+            except PermissionError:
+                fallback = (Path.cwd() / 'render_logs').resolve()
+                fallback.mkdir(parents=True, exist_ok=True)
+                self.render_output_root = fallback
+                base_render_path = fallback
+
+        render_dir = getattr(self, '_render_directory_path', None)
+        needs_new_dir = render_dir is None
+
+        if not needs_new_dir and ensure_exists:
+            render_dir = Path(render_dir)
+            try:
+                needs_new_dir = not render_dir.is_relative_to(base_render_path)
+            except AttributeError:
+                needs_new_dir = base_render_path not in render_dir.parents and render_dir != base_render_path
+
+        if needs_new_dir:
             if self.render_session_name:
-                self._render_directory_path = (base_render_path / Path(self.render_session_name)).expanduser().resolve()
+                render_dir = (base_render_path / Path(self.render_session_name)).expanduser().resolve()
             else:
                 if getattr(self, '_render_timestamp', None) is None:
                     self._render_timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                self._render_directory_path = (base_render_path / self._render_timestamp).resolve()
+                render_dir = (base_render_path / self._render_timestamp).resolve()
 
-        target_path = self._render_directory_path
-        target_path.mkdir(parents=True, exist_ok=True)
+            self._render_directory_path = render_dir
+        else:
+            render_dir = Path(self._render_directory_path)
 
-        if not self._render_dir_initialized:
-            if self.render_session_name:
-                for csv_file in target_path.glob('exported_*.csv'):
-                    try:
-                        csv_file.unlink()
-                    except OSError:
-                        pass
-            self._render_dir_initialized = True
+        if ensure_exists:
+            render_dir.mkdir(parents=True, exist_ok=True)
+            if not self._render_dir_initialized:
+                if self.render_session_name:
+                    for csv_file in render_dir.glob('exported_*.csv'):
+                        try:
+                            csv_file.unlink()
+                        except OSError:
+                            pass
+                self._render_dir_initialized = True
 
-        self.new_folder_path = str(target_path)
+        self.new_folder_path = str(render_dir)
 
     def _get_iso_timestamp(self):
         # Reset time tracking if this is the first step of a new episode

@@ -228,8 +228,8 @@ def test_render_mid_and_end_exports(tmp_path):
             reader = csv.reader(handle)
             rows = list(reader)
 
-        # Header + one row per timestep
-        assert len(rows) == env.episode_tracker.episode_time_steps + 1
+        # Header + one row per simulated timestep
+        assert len(rows) == env.time_step + 1
 
         class _Model:
             pass
@@ -276,7 +276,7 @@ def test_export_final_kpis_flushes_end_mode(tmp_path):
         with community_file.open(newline="") as handle:
             rows = list(csv.reader(handle))
 
-        assert len(rows) == env.episode_tracker.episode_time_steps + 1
+        assert len(rows) == env.time_step + 1
     finally:
         _cleanup_env(env)
         env.close()
